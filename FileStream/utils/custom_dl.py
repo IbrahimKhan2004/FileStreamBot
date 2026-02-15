@@ -166,18 +166,37 @@ class ByteStreamer:
 
         location = await self.get_location(file_id)
 
+        semaphore = asyncio.Semaphore(3)
+
+        async def download_chunk(current_offset):
+            async with semaphore:
+                try:
+                    r = await media_session.invoke(
+                        raw.functions.upload.GetFile(
+                            location=location, offset=current_offset, limit=chunk_size
+                        ),
+                    )
+                    return r.bytes
+                except Exception:
+                    r1 = await media_session.invoke(
+                        raw.functions.upload.GetFile(
+                            location=location, offset=current_offset, limit=512 * 1024
+                        ),
+                    )
+                    r2 = await media_session.invoke(
+                        raw.functions.upload.GetFile(
+                            location=location, offset=current_offset + 512 * 1024, limit=512 * 1024
+                        ),
+                    )
+                    return r1.bytes + r2.bytes
+
         try:
-            r = await media_session.invoke(
-                raw.functions.upload.GetFile(
-                    location=location, offset=offset, limit=chunk_size
-                ),
-            )
-            if isinstance(r, raw.types.upload.File):
-                while True:
-                    chunk = r.bytes
-                    if not chunk:
-                        break
-                    elif part_count == 1:
+            tasks = []
+            for i in range(part_count):
+                tasks.append(asyncio.create_task(download_chunk(offset + i * chunk_size)))
+                if len(tasks) >= 3:
+                    chunk = await tasks.pop(0)
+                    if part_count == 1:
                         yield chunk[first_part_cut:last_part_cut]
                     elif current_part == 1:
                         yield chunk[first_part_cut:]
@@ -185,18 +204,19 @@ class ByteStreamer:
                         yield chunk[:last_part_cut]
                     else:
                         yield chunk
-
                     current_part += 1
-                    offset += chunk_size
 
-                    if current_part > part_count:
-                        break
-
-                    r = await media_session.invoke(
-                        raw.functions.upload.GetFile(
-                            location=location, offset=offset, limit=chunk_size
-                        ),
-                    )
+            for task in tasks:
+                chunk = await task
+                if part_count == 1:
+                    yield chunk[first_part_cut:last_part_cut]
+                elif current_part == 1:
+                    yield chunk[first_part_cut:]
+                elif current_part == part_count:
+                    yield chunk[:last_part_cut]
+                else:
+                    yield chunk
+                current_part += 1
         except (TimeoutError, AttributeError):
             pass
         finally:
