@@ -155,12 +155,21 @@ def get_file_info(message):
 
 
 async def update_file_id(msg_id, multi_clients):
-    file_ids = {}
-    for client_id, client in multi_clients.items():
-        log_msg = await client.get_messages(Telegram.FLOG_CHANNEL, msg_id)
-        media = get_media_from_message(log_msg)
-        file_ids[str(client.id)] = getattr(media, "file_id", "")
+    # Changed: fetch from all clients concurrently instead of one-by-one sequential loop
+    # Why: each get_messages() is a network round-trip; with N bots this was N×latency serialised
+    # Example: 3 clients at 300ms each = 900ms before → ~300ms after (all fire simultaneously)
+    client_items = list(multi_clients.items())  # Snapshot items so gather order is stable
 
+    async def _fetch(client_id, client):  # Inner coroutine per client; result keyed by client.id
+        log_msg = await client.get_messages(Telegram.FLOG_CHANNEL, msg_id)  # Same call as before, now concurrent
+        media = get_media_from_message(log_msg)  # Unchanged: extract media object from fetched message
+        return str(client.id), getattr(media, "file_id", "")  # Return (key, value) tuple for dict assembly
+
+    results = await asyncio.gather(  # Changed: replaces sequential for-loop; all clients fetched in parallel
+        *[_fetch(cid, c) for cid, c in client_items],  # One coroutine per client, same logic as before
+        return_exceptions=False  # Fail fast if any client fetch raises; preserves original error behaviour
+    )
+    file_ids = dict(results)  # Changed: assemble dict from gathered (key, value) pairs instead of loop assignment
     return file_ids
 
 
