@@ -80,8 +80,9 @@ async def is_user_joined(bot, message: Message):
 
 #---------------------[ PRIVATE GEN LINK + CALLBACK ]---------------------#
 
-async def gen_link(_id):
-    file_info = await db.get_file(_id)
+async def gen_link(_id, file_info=None):  # Changed: added optional file_info param; avoids duplicate db.get_file() when caller already has it (e.g. stream.py after get_file_ids)
+    if file_info is None:  # Added: only fetch from DB if caller didn't supply it; fully backward-compatible — existing callers with no file_info arg work unchanged
+        file_info = await db.get_file(_id)  # Unchanged: fallback DB fetch for callers that don't pass file_info
     file_name = file_info['file_name']
     file_size = humanbytes(file_info['file_size'])
     mime_type = file_info['mime_type']
