@@ -6,6 +6,7 @@ from FileStream.utils.database import Database
 from FileStream.utils.human_readable import humanbytes
 from FileStream.config import Telegram, Server
 from FileStream.bot import FileStream
+from FileStream.utils.file_properties import get_hash
 import asyncio
 from typing import (
     Union
@@ -85,8 +86,17 @@ async def gen_link(_id):
     file_size = humanbytes(file_info['file_size'])
     mime_type = file_info['mime_type']
 
-    page_link = f"{Server.URL}watch/{_id}"
-    stream_link = f"{Server.URL}dl/{_id}"
+    # Check if we have log_msg_id to generate a database-independent link
+    if "log_msg_id" in file_info:
+        # Use Hash + MsgID format for new/updated files
+        secure_hash = get_hash(file_info['file_unique_id'], 10)
+        link_id = f"{secure_hash}{file_info['log_msg_id']}"
+    else:
+        # Use old DB ID format for existing files until they are "refreshed"
+        link_id = _id
+
+    page_link = f"{Server.URL}watch/{_id}" # Watch page can still use DB ID for metadata
+    stream_link = f"{Server.URL}dl/{link_id}"
     file_link = f"https://t.me/{FileStream.username}?start=file_{_id}"
 
     if "video" in mime_type:
@@ -117,8 +127,14 @@ async def gen_linkx(m:Message , _id, name: list):
     mime_type = file_info['mime_type']
     file_size = humanbytes(file_info['file_size'])
 
+    if "log_msg_id" in file_info:
+        secure_hash = get_hash(file_info['file_unique_id'], 10)
+        link_id = f"{secure_hash}{file_info['log_msg_id']}"
+    else:
+        link_id = _id
+
     page_link = f"{Server.URL}watch/{_id}"
-    stream_link = f"{Server.URL}dl/{_id}"
+    stream_link = f"{Server.URL}dl/{link_id}"
     file_link = f"https://t.me/{FileStream.username}?start=file_{_id}"
 
     if "video" in mime_type:

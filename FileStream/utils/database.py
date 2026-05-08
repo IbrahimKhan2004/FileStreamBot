@@ -116,6 +116,9 @@ class Database:
     async def update_file_ids(self, _id, file_ids: dict):
         await self.file.update_one({"_id": ObjectId(_id)}, {"$set": {"file_ids": file_ids}})
 
+    async def update_log_msg_id(self, _id, log_msg_id: int):
+        await self.file.update_one({"_id": ObjectId(_id)}, {"$set": {"log_msg_id": log_msg_id}})
+
 # ---------------------[ PAID SYS ]---------------------#
 #     async def link_available(self, id):
 #         user = await self.col.find_one({"id": id})

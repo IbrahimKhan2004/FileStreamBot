@@ -48,7 +48,18 @@ async def stream_handler(request: web.Request):
 async def stream_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        return await media_streamer(request, path)
+        import re
+
+        # New format: Hash(10 chars) + MsgID.
+        # We explicitly check that the path length is NOT 24 to avoid matching Mongo ObjectIds.
+        match = re.search(r"^([0-9a-f]{10})(\d+)$", path)
+        if match and len(path) != 24:
+            secure_hash = match.group(1)
+            message_id = int(match.group(2))
+            return await media_streamer(request, message_id=message_id, secure_hash=secure_hash)
+        else:
+            # Old Database ID format (Mongo ObjectId is 24 hex chars)
+            return await media_streamer(request, db_id=path)
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
     except FIleNotFound as e:
@@ -63,7 +74,7 @@ async def stream_handler(request: web.Request):
 
 class_cache = {}
 
-async def media_streamer(request: web.Request, db_id: str):
+async def media_streamer(request: web.Request, db_id: str = None, message_id: int = None, secure_hash: str = None):
     range_header = request.headers.get("Range", 0)
     
     index = min(work_loads, key=work_loads.get)
@@ -79,8 +90,18 @@ async def media_streamer(request: web.Request, db_id: str):
         logging.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = utils.ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
+
     logging.debug("before calling get_file_properties")
-    file_id = await tg_connect.get_file_properties(db_id, multi_clients)
+    if db_id:
+        file_id = await tg_connect.get_file_properties(db_id=db_id, multi_clients=multi_clients)
+    elif message_id:
+        file_id = await tg_connect.get_file_properties(db_id=None, multi_clients=multi_clients, message_id=message_id)
+        if utils.get_hash(file_id.unique_id, 10) != secure_hash:
+            logging.debug(f"Invalid hash for message with ID {message_id}")
+            raise InvalidHash
+    else:
+        raise FIleNotFound
+
     logging.debug("after calling get_file_properties")
     
     file_size = file_id.file_size
@@ -119,9 +140,6 @@ async def media_streamer(request: web.Request, db_id: str):
 
     if not mime_type:
         mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-
-    # if "video/" in mime_type or "audio/" in mime_type:
-    #     disposition = "inline"
 
     return web.Response(
         status=206 if range_header else 200,

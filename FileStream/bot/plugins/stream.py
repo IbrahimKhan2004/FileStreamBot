@@ -1,9 +1,8 @@
-
 import asyncio
 from FileStream.bot import FileStream, multi_clients
 from FileStream.utils.bot_utils import is_user_banned, is_user_exist, is_user_joined, gen_link, is_channel_banned, is_channel_exist, is_user_authorized
 from FileStream.utils.database import Database
-from FileStream.utils.file_properties import get_file_ids, get_file_info
+from FileStream.utils.file_properties import get_file_ids, get_file_info, get_hash
 from FileStream.config import Telegram, Server
 from pyrogram import filters, Client
 from pyrogram.errors import FloodWait
@@ -36,7 +35,9 @@ async def private_receive_handler(bot: Client, message: Message):
             return
     try:
         inserted_id = await db.add_file(get_file_info(message))
+        # This call will now also update log_msg_id
         await get_file_ids(False, inserted_id, multi_clients, message)
+
         reply_markup, stream_text = await gen_link(_id=inserted_id)
         await message.reply_text(
             text=stream_text,
@@ -74,13 +75,20 @@ async def channel_receive_handler(bot: Client, message: Message):
     try:
         inserted_id = await db.add_file(get_file_info(message))
         await get_file_ids(False, inserted_id, multi_clients, message)
-        reply_markup, stream_link = await gen_link(_id=inserted_id)
+
+        file_info = await db.get_file(inserted_id)
+        if "log_msg_id" in file_info:
+            secure_hash = get_hash(file_info['file_unique_id'], 10)
+            link_id = f"{secure_hash}{file_info['log_msg_id']}"
+        else:
+            link_id = inserted_id
+
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id,
             message_id=message.id,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Direct Download Link",
-                                       url=f"{Server.URL}dl/{str(inserted_id)}")]])
+                                       url=f"{Server.URL}dl/{str(link_id)}")]])
         )
 
     except FloodWait as w:
@@ -93,4 +101,3 @@ async def channel_receive_handler(bot: Client, message: Message):
         await bot.send_message(chat_id=Telegram.ULOG_CHANNEL, text=f"**#EʀʀᴏʀTʀᴀᴄᴋᴇʙᴀᴄᴋ:** `{e}`",
                                disable_web_page_preview=True)
         print(f"Cᴀɴ'ᴛ Eᴅɪᴛ Bʀᴏᴀᴅᴄᴀsᴛ Mᴇssᴀɢᴇ!\nEʀʀᴏʀ:  **Gɪᴠᴇ ᴍᴇ ᴇᴅɪᴛ ᴘᴇʀᴍɪssɪᴏɴ ɪɴ ᴜᴘᴅᴀᴛᴇs ᴀɴᴅ ʙɪɴ Cʜᴀɴɴᴇʟ!{e}**")
-
