@@ -37,11 +37,14 @@ async def private_receive_handler(bot: Client, message: Message):
         if not await is_user_joined(bot, message):
             return
     try:
-        inserted_id = await db.add_file(get_file_info(message))
-        # This call will now also update log_msg_id
-        await get_file_ids(False, inserted_id, multi_clients, message)
+        inserted_id = await db.add_file(get_file_info(message))  # Unchanged: insert/deduplicate file record in DB
 
-        reply_markup, stream_text = await gen_link(_id=inserted_id)
+        _, file_info = await asyncio.gather(  # Changed: run get_file_ids and db.get_file concurrently; previously sequential (2× network latency)
+            get_file_ids(False, inserted_id, multi_clients, message),  # Unchanged logic: stores log_msg_id + file_ids in DB; result discarded (False client)
+            db.get_file(inserted_id),  # Changed: fetch file_info in parallel instead of implicitly inside gen_link later
+        )  # Why: both calls hit independent resources (Telegram API vs MongoDB); no dependency between them
+
+        reply_markup, stream_text = await gen_link(_id=inserted_id, file_info=file_info)  # Changed: pass pre-fetched file_info to skip gen_link's own db.get_file call; saves 1 DB round-trip
         await message.reply_text(
             text=stream_text,
             parse_mode=ParseMode.HTML,
