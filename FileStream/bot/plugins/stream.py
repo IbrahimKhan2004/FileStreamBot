@@ -1,13 +1,16 @@
 import asyncio
+import logging  # Added: enables structured diagnostic logging for silent errors
 from FileStream.bot import FileStream, multi_clients
 from FileStream.utils.bot_utils import is_user_banned, is_user_exist, is_user_joined, gen_link, is_channel_banned, is_channel_exist, is_user_authorized
 from FileStream.utils.database import Database
 from FileStream.utils.file_properties import get_file_ids, get_file_info, get_hash
 from FileStream.config import Telegram, Server
 from pyrogram import filters, Client
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, ButtonUrlInvalid  # Added ButtonUrlInvalid: root cause of [400 BUTTON_URL_INVALID], e.g. FQDN=0.0.0.0
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums.parse_mode import ParseMode
+
+logger = logging.getLogger(__name__)  # Added: module-level logger so errors are traceable by file name
 db = Database(Telegram.DATABASE_URL, Telegram.SESSION_NAME)
 
 @FileStream.on_message(
@@ -44,6 +47,18 @@ async def private_receive_handler(bot: Client, message: Message):
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=reply_markup,
+            quote=True
+        )
+    except ButtonUrlInvalid:  # Added: catches [400 BUTTON_URL_INVALID] — Telegram rejects URLs with invalid hosts (e.g. FQDN=0.0.0.0 or missing domain)
+        bad_url = Server.URL  # Capture: surface the exact bad URL so the operator can fix FQDN env var
+        logger.error(  # Added: structured log makes silent Telegram 400 visible with the offending URL value
+            "BUTTON_URL_INVALID for user_id=%s inserted_id=%s — Server.URL=%r is not a public URL. "  # Changed: includes all variable states per user preference
+            "Fix: set FQDN env var to your public domain or IP (not 0.0.0.0).",
+            message.from_user.id, inserted_id, bad_url
+        )
+        await message.reply_text(  # Added: inform user gracefully instead of crashing silently
+            "⚠️ Sᴇʀᴠᴇʀ ᴄᴏɴғɪɢᴜʀᴀᴛɪᴏɴ ᴇʀʀᴏʀ: ᴛʜᴇ sᴛʀᴇᴀᴍ ᴜʀʟ ɪs ɴᴏᴛ ᴘᴜʙʟɪᴄʟʏ ʀᴇᴀᴄʜᴀʙʟᴇ.\n"
+            "Pʟᴇᴀsᴇ ᴄᴏɴᴛᴀᴄᴛ ᴛʜᴇ ʙᴏᴛ ᴀᴅᴍɪɴɪsᴛʀᴀᴛᴏʀ.",
             quote=True
         )
     except FloodWait as e:
