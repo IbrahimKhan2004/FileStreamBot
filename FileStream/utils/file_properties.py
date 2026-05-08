@@ -16,9 +16,13 @@ db = Database(Telegram.DATABASE_URL, Telegram.SESSION_NAME)
 
 async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message, log_msg_id: int = None) -> Optional[FileId]:
     logging.debug("Starting of get_file_ids")
+
+    # Use FileStream if client is False/None (pre-fetching case)
+    current_client = client if isinstance(client, Client) else FileStream
+
     if log_msg_id:
         logging.debug(f"Fetching file_id from log_msg_id: {log_msg_id}")
-        msg = await client.get_messages(Telegram.FLOG_CHANNEL, log_msg_id)
+        msg = await current_client.get_messages(Telegram.FLOG_CHANNEL, log_msg_id)
         if msg.empty:
             raise Exception("Message not found in log channel")
         media = get_media_from_message(msg)
@@ -46,19 +50,21 @@ async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message
         file_info = await db.get_file(db_id)
 
     file_id_info = file_info.setdefault("file_ids", {})
-    if not str(client.id) in file_id_info:
+    client_id_str = str(current_client.id) if hasattr(current_client, "id") else str((await current_client.get_me()).id)
+
+    if not client_id_str in file_id_info:
         logging.debug("Storing file_id in DB")
         log_msg = await send_file(FileStream, db_id, file_info["file_id"], message)
         await db.update_log_msg_id(db_id, log_msg.id)
-        msg = await client.get_messages(Telegram.FLOG_CHANNEL, log_msg.id)
+        msg = await current_client.get_messages(Telegram.FLOG_CHANNEL, log_msg.id)
         media = get_media_from_message(msg)
-        file_id_info[str(client.id)] = getattr(media, "file_id", "")
+        file_id_info[client_id_str] = getattr(media, "file_id", "")
         await db.update_file_ids(db_id, file_id_info)
         logging.debug("Stored file_id in DB")
 
     logging.debug("Middle of get_file_ids")
     try:
-        file_id_str = file_id_info.get(str(client.id))
+        file_id_str = file_id_info.get(client_id_str)
         if not file_id_str:
              # Refresh using Main Bot if possible
              log_msg = await send_file(FileStream, db_id, file_info["file_id"], message)

@@ -48,16 +48,17 @@ async def stream_handler(request: web.Request):
 async def stream_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        # Determine if it is a new format (Hash + MsgID) or old format (DB ID)
         import re
-        # EverythingSuckz logic: Hash(10 chars) + MsgID
+
+        # New format: Hash(10 chars) + MsgID.
+        # We explicitly check that the path length is NOT 24 to avoid matching Mongo ObjectIds.
         match = re.search(r"^([0-9a-f]{10})(\d+)$", path)
-        if match:
+        if match and len(path) != 24:
             secure_hash = match.group(1)
             message_id = int(match.group(2))
             return await media_streamer(request, message_id=message_id, secure_hash=secure_hash)
         else:
-            # Old Database ID format
+            # Old Database ID format (Mongo ObjectId is 24 hex chars)
             return await media_streamer(request, db_id=path)
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
@@ -92,12 +93,9 @@ async def media_streamer(request: web.Request, db_id: str = None, message_id: in
 
     logging.debug("before calling get_file_properties")
     if db_id:
-        # Fetch using database ID (for old files)
         file_id = await tg_connect.get_file_properties(db_id=db_id, multi_clients=multi_clients)
     elif message_id:
-        # Fetch using Message ID directly (database-independent)
         file_id = await tg_connect.get_file_properties(db_id=None, multi_clients=multi_clients, message_id=message_id)
-        # Verify hash for security
         if utils.get_hash(file_id.unique_id, 10) != secure_hash:
             logging.debug(f"Invalid hash for message with ID {message_id}")
             raise InvalidHash

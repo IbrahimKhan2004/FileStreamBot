@@ -13,14 +13,12 @@ from pyrogram.types import Message
 db = Database(Telegram.DATABASE_URL, Telegram.SESSION_NAME)
 
 async def render_page(path):
-    # Try to see if it's a new format Hash + MsgID
+    import re
     match = re.search(r"^([0-9a-f]{10})(\d+)$", path)
-    if match:
+    if match and len(path) != 24:
         secure_hash = match.group(1)
         message_id = int(match.group(2))
 
-        # We need to fetch metadata. Use the main bot for this.
-        # We use get_file_ids with message_id to get the FileId object which has metadata
         try:
             file_id = await get_file_ids(FileStream, db_id=None, multi_clients=multi_clients, message=Message, log_msg_id=message_id)
             if get_hash(file_id.unique_id, 10) != secure_hash:
@@ -34,7 +32,6 @@ async def render_page(path):
             logging.error(e)
             return "File Not Found"
     else:
-        # Old Database ID format
         try:
             file_data = await db.get_file(path)
             file_name = file_data['file_name'].replace("_", " ")
