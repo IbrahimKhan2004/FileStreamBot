@@ -1,41 +1,50 @@
+import re
 import time
 import math
 import logging
 import mimetypes
 import traceback
+
 from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine
+
 from FileStream.bot import multi_clients, work_loads, FileStream
 from FileStream.config import Telegram, Server
 from FileStream.server.exceptions import FIleNotFound, InvalidHash
+from FileStream.utils.file_properties import get_media_from_message
 from FileStream import utils, StartTime, __version__
 from FileStream.utils.render_template import render_page
+from FileStream.utils.link_utils import is_old_style_id, verify_new_link
+from pyrogram.file_id import FileId
 
 routes = web.RouteTableDef()
 
+# new-style path: {integer_msg_id}/{filename}
+_NEW_LINK_RE = re.compile(r"^(\d+)/(.+)$")
+
+
 @routes.get("/status", allow_head=True)
 async def root_route_handler(_):
-    return web.json_response(
-        {
-            "server_status": "running",
-            "uptime": utils.get_readable_time(time.time() - StartTime),
-            "telegram_bot": "@" + FileStream.username,
-            "connected_bots": len(multi_clients),
-            "loads": dict(
-                ("bot" + str(c + 1), l)
-                for c, (_, l) in enumerate(
-                    sorted(work_loads.items(), key=lambda x: x[1], reverse=True)
-                )
-            ),
-            "version": __version__,
-        }
-    )
+    return web.json_response({
+        "server_status": "running",
+        "uptime": utils.get_readable_time(time.time() - StartTime),
+        "telegram_bot": "@" + FileStream.username,
+        "connected_bots": len(multi_clients),
+        "loads": dict(
+            ("bot" + str(c + 1), l)
+            for c, (_, l) in enumerate(
+                sorted(work_loads.items(), key=lambda x: x[1], reverse=True)
+            )
+        ),
+        "version": __version__,
+    })
+
 
 @routes.get("/watch/{path}", allow_head=True)
-async def stream_handler(request: web.Request):
+async def watch_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        return web.Response(text=await render_page(path), content_type='text/html')
+        return web.Response(text=await render_page(path), content_type="text/html")
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
     except FIleNotFound as e:
@@ -44,22 +53,26 @@ async def stream_handler(request: web.Request):
         pass
 
 
-@routes.get("/dl/{path}", allow_head=True)
+@routes.get("/dl/{path:.*}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
         path = request.match_info["path"]
-        import re
 
-        # New format: Hash(10 chars) + MsgID.
-        # We explicitly check that the path length is NOT 24 to avoid matching Mongo ObjectIds.
-        match = re.search(r"^([0-9a-f]{10})(\d+)$", path)
-        if match and len(path) != 24:
-            secure_hash = match.group(1)
-            message_id = int(match.group(2))
-            return await media_streamer(request, message_id=message_id, secure_hash=secure_hash)
-        else:
-            # Old Database ID format (Mongo ObjectId is 24 hex chars)
-            return await media_streamer(request, db_id=path)
+        if is_old_style_id(path):
+            # ── OLD links: DB-based (unchanged) ──────────────────────────────
+            return await _stream_old(request, path)
+
+        m = _NEW_LINK_RE.match(path)
+        if m:
+            # ── NEW links: message_id + HMAC (no DB) ─────────────────────────
+            msg_id = int(m.group(1))
+            token = request.rel_url.query.get("hash", "")
+            if not token or not verify_new_link(msg_id, token):
+                raise InvalidHash()
+            return await _stream_new(request, msg_id)
+
+        raise FIleNotFound()
+
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
     except FIleNotFound as e:
@@ -69,41 +82,67 @@ async def stream_handler(request: web.Request):
     except Exception as e:
         traceback.print_exc()
         logging.critical(e.with_traceback(None))
-        logging.debug(traceback.format_exc())
         raise web.HTTPInternalServerError(text=str(e))
 
-class_cache = {}
 
-async def media_streamer(request: web.Request, db_id: str = None, message_id: int = None, secure_hash: str = None):
-    range_header = request.headers.get("Range", 0)
-    
+# ── Client picker ────────────────────────────────────────────────────────────
+
+def _pick_client():
     index = min(work_loads, key=work_loads.get)
-    faster_client = multi_clients[index]
-    
-    if Telegram.MULTI_CLIENT:
-        logging.info(f"Client {index} is now serving {request.headers.get('X-FORWARDED-FOR',request.remote)}")
+    return index, multi_clients[index]
 
-    if faster_client in class_cache:
-        tg_connect = class_cache[faster_client]
-        logging.debug(f"Using cached ByteStreamer object for client {index}")
-    else:
-        logging.debug(f"Creating new ByteStreamer object for client {index}")
-        tg_connect = utils.ByteStreamer(faster_client)
-        class_cache[faster_client] = tg_connect
 
-    logging.debug("before calling get_file_properties")
-    if db_id:
-        file_id = await tg_connect.get_file_properties(db_id=db_id, multi_clients=multi_clients)
-    elif message_id:
-        file_id = await tg_connect.get_file_properties(db_id=None, multi_clients=multi_clients, message_id=message_id)
-        if utils.get_hash(file_id.unique_id, 10) != secure_hash:
-            logging.debug(f"Invalid hash for message with ID {message_id}")
-            raise InvalidHash
-    else:
-        raise FIleNotFound
+# ── Cache per streamer ───────────────────────────────────────────────────────
+_class_cache = {}
 
-    logging.debug("after calling get_file_properties")
-    
+def _get_streamer(client):
+    if client not in _class_cache:
+        _class_cache[client] = utils.ByteStreamer(client)
+    return _class_cache[client]
+
+
+# ── OLD-style (DB lookup) ────────────────────────────────────────────────────
+
+async def _stream_old(request: web.Request, db_id: str):
+    range_header = request.headers.get("Range", 0)
+    index, client = _pick_client()
+    tg = _get_streamer(client)
+    file_id = await tg.get_file_properties(db_id, multi_clients)
+    return _build_response(request, tg, file_id, index, range_header)
+
+
+# ── NEW-style (message_id direct, no DB) ─────────────────────────────────────
+
+async def _stream_new(request: web.Request, msg_id: int):
+    range_header = request.headers.get("Range", 0)
+    index, client = _pick_client()
+    tg = _get_streamer(client)
+
+    cache_key = f"msg:{msg_id}"
+    if cache_key not in tg.cached_file_ids:
+        msg = await client.get_messages(Telegram.FLOG_CHANNEL, msg_id)
+        if not msg or msg.empty:
+            raise FIleNotFound()
+        media = get_media_from_message(msg)
+        if not media:
+            raise FIleNotFound()
+        raw_id = getattr(media, "file_id", "")
+        if not raw_id:
+            raise FIleNotFound()
+        file_id = FileId.decode(raw_id)
+        setattr(file_id, "file_size", getattr(media, "file_size", 0))
+        setattr(file_id, "mime_type", getattr(media, "mime_type", "application/octet-stream"))
+        file_name = getattr(media, "file_name", None) or f"file_{msg_id}"
+        setattr(file_id, "file_name", file_name)
+        setattr(file_id, "unique_id", getattr(media, "file_unique_id", ""))
+        tg.cached_file_ids[cache_key] = file_id
+
+    return _build_response(request, tg, tg.cached_file_ids[cache_key], index, range_header)
+
+
+# ── Shared response builder ──────────────────────────────────────────────────
+
+def _build_response(request, tg, file_id, index, range_header):
     file_size = file_id.file_size
 
     if range_header:
@@ -123,21 +162,18 @@ async def media_streamer(request: web.Request, db_id: str = None, message_id: in
 
     chunk_size = 1024 * 1024
     until_bytes = min(until_bytes, file_size - 1)
-
     offset = from_bytes - (from_bytes % chunk_size)
     first_part_cut = from_bytes - offset
     last_part_cut = until_bytes % chunk_size + 1
-
     req_length = until_bytes - from_bytes + 1
     part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
-    body = tg_connect.yield_file(
+
+    body = tg.yield_file(
         file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
     )
 
     mime_type = file_id.mime_type
     file_name = utils.get_name(file_id)
-    disposition = "attachment"
-
     if not mime_type:
         mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
@@ -145,10 +181,10 @@ async def media_streamer(request: web.Request, db_id: str = None, message_id: in
         status=206 if range_header else 200,
         body=body,
         headers={
-            "Content-Type": f"{mime_type}",
+            "Content-Type": mime_type,
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
+            "Content-Disposition": f'attachment; filename="{file_name}"',
             "Accept-Ranges": "bytes",
         },
     )
