@@ -3,12 +3,9 @@ link_utils.py
 
 New-style links (new files — NO DB):
     dl/{msg_id}/{filename}?hash=HMAC[:24]
-    → Forward to FLOG_CHANNEL → get message_id → sign with HASH_KEY → done
-    No database entry ever created for new files.
 
-Old-style links (existing 4000+ files — DB untouched):
-    dl/69fd9cb2335701c5c4a1a1ce
-    → DB lookup as before, nothing changed.
+Old-style links (existing files — DB lookup):
+    dl/{hex_id}   — any length hex string (MongoDB ObjectId or legacy IDs)
 """
 
 from __future__ import annotations
@@ -35,5 +32,10 @@ def verify_new_link(msg_id: int, token: str) -> bool:
 
 
 def is_old_style_id(path: str) -> bool:
-    """24-char hex = MongoDB ObjectId = old-style link."""
-    return len(path) == 24 and all(c in "0123456789abcdefABCDEF" for c in path)
+    """
+    True if path segment is a hex-only string (old DB id — any length).
+    Old: dl/fd8de3f24531018        (15 char hex)
+    Old: dl/69fd9cb2335701c5c4a1a1ce  (24 char hex MongoDB ObjectId)
+    New: dl/12345/movie.mp4        (contains '/' — handled before this)
+    """
+    return len(path) > 0 and all(c in "0123456789abcdefABCDEF" for c in path)
