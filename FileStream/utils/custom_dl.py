@@ -179,7 +179,11 @@ class ByteStreamer:
                         ),
                     )
                     return r.bytes
-                except Exception:
+                except Exception as e:
+                    if type(e) is OSError:
+                        if client.media_sessions.get(file_id.dc_id) is media_session:
+                            del client.media_sessions[file_id.dc_id]
+                        raise
                     r1 = await media_session.invoke(
                         raw.functions.upload.GetFile(
                             location=location, offset=current_offset, limit=512 * 1024
@@ -222,6 +226,7 @@ class ByteStreamer:
         except (TimeoutError, AttributeError):
             pass
         finally:
+            for t in tasks: t.cancel()
             logging.debug(f"Finished yielding file with {current_part} parts.")
             work_loads[index] -= 1
 
